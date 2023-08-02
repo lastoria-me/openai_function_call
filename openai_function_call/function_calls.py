@@ -164,7 +164,7 @@ class openai_function:
                 result_str = json.dumps(result_as_dict, default=datetime_handler)
             else:
                 # Serialize the result to a JSON string
-                result_str = json.dumps(result_as_dict, default=datetime_handler)
+                result_str = json.dumps(result, default=datetime_handler)
 
             # Create a new message containing the serialized function output
             function_output_message = {
