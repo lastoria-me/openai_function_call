@@ -21,10 +21,11 @@
 # SOFTWARE.
 
 import json
+import datetime 
+import inspect
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, get_type_hints, Dict
 from pydantic import BaseModel, validate_arguments
-
 
 def _remove_a_key(d, remove_key) -> None:
     """Remove a key from a dictionary recursively"""
@@ -63,6 +64,9 @@ class openai_function:
     """
 
     def __init__(self, func: Callable) -> None:
+        # Assert that the function has a return type
+        assert get_type_hints(func).get('return'), "The function must have a return type."
+        
         self.func = func
         self.validate_func = validate_arguments(func)
         parameters = self.validate_func.model.model_json_schema()
@@ -112,6 +116,69 @@ class openai_function:
         function_call = message["function_call"]
         arguments = json.loads(function_call["arguments"], strict=False)
         return self.validate_func(**arguments)
+    
+    def handle_completion(self, completion):
+        """
+        Handles the completion of an OpenAI chat model response.
+
+        This function extracts the function call details from the response of the OpenAI API, 
+        uses them to invoke the respective function, and handles the results. The results are 
+        then wrapped into a new message and included in the returned list of messages.
+
+        If the result happens to be a list of Pydantic models (an edge case), the function 
+        ensures the list is transformed into a list of dictionaries before serialization.
+
+        Parameters:
+            completion (openai.ChatCompletion): The response from OpenAI's API
+
+        Returns:
+            messages (List[dict]): A list of messages containing the original assistant's message 
+            and possibly a new message with the function's output
+        """
+        def datetime_handler(obj):
+            if isinstance(obj, datetime.datetime):
+                return obj.isoformat()
+            raise TypeError("Type %s not serializable" % type(obj))
+
+        # Extract the assistant's message from the completion
+        assistant_message = completion.choices[0].message
+        assistant_message: Dict = assistant_message.to_dict_recursive()
+        
+        # Check if the assistant's message contains a function call
+        if "function_call" in assistant_message:
+            # Extract the function call and arguments
+            function_call = assistant_message["function_call"]
+            arguments = json.loads(function_call["arguments"], strict=False)
+
+            # Invoke the function with the extracted arguments
+            result = self.validate_func(**arguments)
+
+            # Get the expected return type of the function
+            return_type = get_type_hints(self.func)['return']
+
+            # Check if the return type is a list of Pydantic models
+            if getattr(return_type, '__origin__', None) is list and issubclass(return_type.__args__[0], BaseModel):
+                # Convert each item in the list to a dictionary
+                result_as_dict = [item.dict() for item in result]
+                # Serialize the list of dictionaries to a JSON string
+                result_str = json.dumps(result_as_dict, default=datetime_handler)
+            else:
+                # Serialize the result to a JSON string
+                result_str = json.dumps(result_as_dict, default=datetime_handler)
+
+            # Create a new message containing the serialized function output
+            function_output_message = {
+                "role": "function",
+                "content": result_str,
+                "name": assistant_message["function_call"]["name"]
+            }
+
+            # Return the original assistant's message and the new message as a list
+            return [assistant_message, function_output_message]
+
+        else:  # If the assistant's message doesn't contain a function call
+            # Return the assistant's message as a list
+            return [assistant_message]
 
 
 class OpenAISchema(BaseModel):
