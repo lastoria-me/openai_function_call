@@ -117,7 +117,7 @@ class openai_function:
         arguments = json.loads(function_call["arguments"], strict=False)
         return self.validate_func(**arguments)
     
-    def handle_completion(self, completion):
+    def execute_function(self, arguments, function_name, extra_args):
         """
         Handles the completion of an OpenAI chat model response.
 
@@ -140,45 +140,31 @@ class openai_function:
                 return obj.isoformat()
             raise TypeError("Type %s not serializable" % type(obj))
 
-        # Extract the assistant's message from the completion
-        assistant_message = completion.choices[0].message
-        assistant_message: Dict = assistant_message.to_dict_recursive()
-        
-        # Check if the assistant's message contains a function call
-        if "function_call" in assistant_message:
-            # Extract the function call and arguments
-            function_call = assistant_message["function_call"]
-            arguments = json.loads(function_call["arguments"], strict=False)
+        # Invoke the function with the extracted arguments
+        result = self.validate_func(**arguments, **extra_args)
 
-            # Invoke the function with the extracted arguments
-            result = self.validate_func(**arguments)
+        # Get the expected return type of the function
+        return_type = get_type_hints(self.func)['return']
 
-            # Get the expected return type of the function
-            return_type = get_type_hints(self.func)['return']
+        # Check if the return type is a list of Pydantic models
+        if getattr(return_type, '__origin__', None) is list and issubclass(return_type.__args__[0], BaseModel):
+            # Convert each item in the list to a dictionary
+            result_as_dict = [item.dict() for item in result]
+            # Serialize the list of dictionaries to a JSON string
+            result_str = json.dumps(result_as_dict, default=datetime_handler)
+        else:
+            # Serialize the result to a JSON string
+            result_str = json.dumps(result, default=datetime_handler)
 
-            # Check if the return type is a list of Pydantic models
-            if getattr(return_type, '__origin__', None) is list and issubclass(return_type.__args__[0], BaseModel):
-                # Convert each item in the list to a dictionary
-                result_as_dict = [item.dict() for item in result]
-                # Serialize the list of dictionaries to a JSON string
-                result_str = json.dumps(result_as_dict, default=datetime_handler)
-            else:
-                # Serialize the result to a JSON string
-                result_str = json.dumps(result, default=datetime_handler)
+        # Create a new message containing the serialized function output
+        function_output_message = {
+            "role": "function",
+            "content": result_str,
+            "name": function_name
+        }
 
-            # Create a new message containing the serialized function output
-            function_output_message = {
-                "role": "function",
-                "content": result_str,
-                "name": assistant_message["function_call"]["name"]
-            }
-
-            # Return the original assistant's message and the new message as a list
-            return [assistant_message, function_output_message]
-
-        else:  # If the assistant's message doesn't contain a function call
-            # Return the assistant's message as a list
-            return [assistant_message]
+        # Return the original assistant's message and the new message as a list
+        return function_output_message
 
 
 class OpenAISchema(BaseModel):
